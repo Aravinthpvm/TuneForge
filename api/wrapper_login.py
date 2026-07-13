@@ -55,6 +55,39 @@ def emit_status(patch):
         from .queue_manager import emit_event
         emit_event('wrapper.login', _active_login['status'])
 
+def extract_wrapper_failure_reason(collected_log):
+    lines = [l.strip() for l in collected_log.split('\n') if l.strip()]
+    
+    # Check for dialogHandler printouts from the binary
+    # E.g. [.] dialogHandler: {title: "...", message: "..."}
+    dialog_re = re.compile(r'^\[\.\]\s*dialogHandler:\s*\{title:\s*(.*?),\s*message:\s*(.*?)\}$', re.IGNORECASE)
+    
+    for line in reversed(lines):
+        m = dialog_re.match(line)
+        if m:
+            title = m.group(1).strip().strip('"').strip("'")
+            message = m.group(2).strip().strip('"').strip("'")
+            if not title or title.lower() == 'sign in':
+                continue
+            if 'disabled' in title.lower():
+                return f"Your Apple Account is disabled. {message or 'Reset it at iforgot.apple.com, then try again.'}"
+            if 'account information' in title.lower():
+                return "Apple rejected the email or password. Double-check both and try again."
+            if 'locked' in title.lower():
+                return f"Apple Account locked. {message or 'Reset it at iforgot.apple.com before retrying.'}"
+            if 'billing' in title.lower() or 'payment' in title.lower():
+                return f"Apple Music sign-in needs attention: {title}. {message}"
+            
+            joined = " — ".join(filter(None, [title, message]))
+            if joined:
+                return joined[:240]
+                
+    for line in reversed(lines):
+        if '[!] Failed to get 2FA Code' in line:
+            return "2FA code wasn’t entered in time. Try again."
+            
+    return None
+
 def run_login_worker(email, password, client):
     global _active_login, _hard_block_reason
     
@@ -113,24 +146,20 @@ def run_login_worker(email, password, client):
         '/dev/zero:/app/rootfs/dev/zero'
     ]
 
-    emit_status({'phase': 'connecting', 'message': 'Starting login container'})
+    emit_status({'phase': 'creating', 'message': 'Starting login container'})
     
     # 2. Start Login Container
     login_container = None
     try:
-        # Recreate network config
-        nw_config = None
-        network_mode = spec['network'] or 'alacarte-net'
-        if network_mode and not network_mode.startswith('container:'):
-            nw_config = {network_mode: {}}
-            
+        login_arg = f"{email}:{password}"
         login_container = client.containers.create(
             image=WRAPPER_IMAGE,
-            command=['login', email, password],
+            # Execute with original parameters: -L username:password -F -H 0.0.0.0
+            command=['-L', login_arg, '-F', '-H', '0.0.0.0'],
             name=TEMP_CONTAINER,
             entrypoint=['/app/wrapper'],
             environment={'LD_PRELOAD': '/app/libwrapper_strtok_fix.so'},
-            network=network_mode,
+            network=spec['network'] or 'alacarte-net',
             volumes=binds,
             labels=spec['labels'],
             ports={'10020/tcp': None, '20020/tcp': None, '30020/tcp': None}
@@ -138,7 +167,6 @@ def run_login_worker(email, password, client):
         
         with _active_login_lock:
             if not _active_login:
-                # Cancelled before start
                 login_container.remove(force=True)
                 restore_daemon_wrapper(client, spec)
                 return
@@ -152,39 +180,43 @@ def run_login_worker(email, password, client):
             _active_login = None
         return
 
-    # 3. Read logs from container to detect 2FA or success
+    # 3. Read logs from container
     try:
-        emit_status({'phase': 'logging-in', 'message': 'Authenticating with Apple...'})
+        emit_status({'phase': 'signing-in', 'message': 'Authenticating with Apple...'})
         logs_generator = login_container.logs(stdout=True, stderr=True, stream=True)
         
+        collected_log = ""
         success = False
         two_fa = False
         error_msg = None
         
         for log_line in logs_generator:
-            line = log_line.decode('utf-8', errors='replace').strip()
-            print(f"[wrapper-login-container] {line}")
+            line = log_line.decode('utf-8', errors='replace')
+            # Redact credentials
+            redacted = line.replace(email, '[redacted]').replace(password, '[redacted]')
+            collected_log += redacted
             
-            # Detect 2FA prompt
-            # wrapper prints "enter 2fa code" or similar when it detects 2fa
-            if '2fa' in line.lower() or 'two-factor' in line.lower() or 'verification code' in line.lower():
+            # Print to stdout for web logs inspection
+            print(f"[wrapper-login-container] {redacted.strip()}")
+            
+            # Emit live log line to client
+            from .queue_manager import emit_event
+            emit_event('wrapper.login.log', {'line': redacted.strip()})
+            
+            # Match 2FA prompt
+            if not two_fa and '[!] Enter your 2FA code into rootfs' in redacted:
                 two_fa = True
-                emit_status({'phase': '2fa', 'message': 'Enter the 2FA code sent to your Apple device.'})
+                emit_status({'phase': '2fa-required', 'message': 'Enter the 2FA code sent to your Apple device.'})
                 
-            # Success indicator
-            if 'login success' in line.lower() or 'ready' in line.lower() or 'auth success' in line.lower() or 'sign in success' in line.lower():
+            # Match success
+            if 'account info cached successfully' in redacted.lower():
                 success = True
                 break
-                
-            # Failure indicator
-            if 'error' in line.lower() or 'failed' in line.lower():
-                error_msg = line
                 
         if success:
             emit_status({'phase': 'success', 'message': 'Apple Sign-In successful!'})
         elif two_fa:
-            # The code wait is handled by checking active state. If success was not set
-            # but 2fa was detected, wait up to 3 minutes for user input.
+            # Wait up to 3 minutes for the user to submit code from the web UI
             start_wait = time.time()
             while time.time() - start_wait < 180:
                 with _active_login_lock:
@@ -195,10 +227,10 @@ def run_login_worker(email, password, client):
                         code = _active_login['two_fa_code']
                         _active_login['two_fa_code'] = None # consume
                         
-                        emit_status({'phase': 'logging-in', 'message': 'Submitting 2FA code...'})
+                        emit_status({'phase': 'signing-in', 'message': 'Submitting 2FA code...'})
                         # Write code via exec inside container
                         try:
-                            # Run exec printf into file
+                            # Drop code to file inside container
                             safe_code = re.sub(r'\D', '', code)[:8]
                             exec_res = login_container.exec_run(
                                 ['sh', '-c', f'printf %s "{safe_code}" > "{WRAPPER_2FA_PATH}"']
@@ -206,9 +238,11 @@ def run_login_worker(email, password, client):
                             print(f"[wrapper-login] 2FA write exit={exec_res.exit_code}")
                         except Exception as write_err:
                             print(f"Failed to write 2FA: {write_err}")
+                
                 time.sleep(1)
-                # Check if process exited or logged success
-                # (Simple check is if container exited)
+                
+                # Check log updates or container status
+                # If success is printed after submitting the code
                 try:
                     login_container.reload()
                     state_info = login_container.attrs.get('State', {})
@@ -221,8 +255,26 @@ def run_login_worker(email, password, client):
                         break
                 except Exception:
                     break
+            
+            # Check if logs showed success during code wait
+            if not success:
+                logs_after = login_container.logs(stdout=True, stderr=True).decode('utf-8', errors='replace')
+                if 'account info cached successfully' in logs_after.lower():
+                    success = True
+                    
+            if success:
+                emit_status({'phase': 'success', 'message': 'Apple Sign-In successful!'})
+            else:
+                reason = extract_wrapper_failure_reason(collected_log)
+                if reason and ('disabled' in reason.lower() or 'locked' in reason.lower()):
+                    _hard_block_reason = reason
+                emit_status({'phase': 'failed', 'error': reason or error_msg or '2FA validation failed'})
         else:
-            emit_status({'phase': 'failed', 'error': error_msg or 'Sign-in failed'})
+            # Parse logs for failure reason
+            reason = extract_wrapper_failure_reason(collected_log)
+            if reason and ('disabled' in reason.lower() or 'locked' in reason.lower()):
+                _hard_block_reason = reason
+            emit_status({'phase': 'failed', 'error': reason or 'Sign-in container exited unexpectedly'})
             
     except Exception as e:
         emit_status({'phase': 'failed', 'error': str(e)})
@@ -240,7 +292,6 @@ def run_login_worker(email, password, client):
 def restore_daemon_wrapper(client, spec):
     emit_status({'phase': 'restoring', 'message': 'Restarting decryption daemon'})
     try:
-        # Recreate container in daemon mode
         binds = [spec['bind']] + [
             '/dev/null:/app/rootfs/dev/null',
             '/dev/urandom:/app/rootfs/dev/urandom',
@@ -248,7 +299,6 @@ def restore_daemon_wrapper(client, spec):
             '/dev/zero:/app/rootfs/dev/zero'
         ]
         
-        # Pull latest compose specifications
         client.containers.run(
             image=WRAPPER_IMAGE,
             command=['-H', '0.0.0.0'],
