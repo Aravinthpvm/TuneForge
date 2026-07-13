@@ -215,66 +215,11 @@ def run_login_worker(email, password, client):
                 
         if success:
             emit_status({'phase': 'success', 'message': 'Apple Sign-In successful!'})
-        elif two_fa:
-            # Wait up to 3 minutes for the user to submit code from the web UI
-            start_wait = time.time()
-            while time.time() - start_wait < 180:
-                with _active_login_lock:
-                    if not _active_login:
-                        # Cancelled
-                        break
-                    if _active_login.get('two_fa_code'):
-                        code = _active_login['two_fa_code']
-                        _active_login['two_fa_code'] = None # consume
-                        
-                        emit_status({'phase': 'signing-in', 'message': 'Submitting 2FA code...'})
-                        # Write code via exec inside container
-                        try:
-                            # Drop code to file inside container
-                            safe_code = re.sub(r'\D', '', code)[:8]
-                            exec_res = login_container.exec_run(
-                                ['sh', '-c', f'printf %s "{safe_code}" > "{WRAPPER_2FA_PATH}"']
-                            )
-                            print(f"[wrapper-login] 2FA write exit={exec_res.exit_code}")
-                        except Exception as write_err:
-                            print(f"Failed to write 2FA: {write_err}")
-                
-                time.sleep(1)
-                
-                # Check log updates or container status
-                # If success is printed after submitting the code
-                try:
-                    login_container.reload()
-                    state_info = login_container.attrs.get('State', {})
-                    if state_info.get('Running') is False:
-                        exit_code = state_info.get('ExitCode')
-                        if exit_code == 0:
-                            success = True
-                        else:
-                            error_msg = f"Login container exited with code {exit_code}"
-                        break
-                except Exception:
-                    break
-            
-            # Check if logs showed success during code wait
-            if not success:
-                logs_after = login_container.logs(stdout=True, stderr=True).decode('utf-8', errors='replace')
-                if 'account info cached successfully' in logs_after.lower():
-                    success = True
-                    
-            if success:
-                emit_status({'phase': 'success', 'message': 'Apple Sign-In successful!'})
-            else:
-                reason = extract_wrapper_failure_reason(collected_log)
-                if reason and ('disabled' in reason.lower() or 'locked' in reason.lower()):
-                    _hard_block_reason = reason
-                emit_status({'phase': 'failed', 'error': reason or error_msg or '2FA validation failed'})
         else:
-            # Parse logs for failure reason
             reason = extract_wrapper_failure_reason(collected_log)
             if reason and ('disabled' in reason.lower() or 'locked' in reason.lower()):
                 _hard_block_reason = reason
-            emit_status({'phase': 'failed', 'error': reason or 'Sign-in container exited unexpectedly'})
+            emit_status({'phase': 'failed', 'error': reason or 'Sign-in failed'})
             
     except Exception as e:
         emit_status({'phase': 'failed', 'error': str(e)})
@@ -339,8 +284,22 @@ def submit_2fa(code):
     with _active_login_lock:
         if not _active_login:
             return False
-        _active_login['two_fa_code'] = code
-        return True
+        container = _active_login.get('container')
+        if not container:
+            return False
+            
+        try:
+            safe_code = re.sub(r'\D', '', code)[:8]
+            # Write 2fa.txt inside container
+            exec_res = container.exec_run(
+                ['sh', '-c', f'printf %s "{safe_code}" > "{WRAPPER_2FA_PATH}"']
+            )
+            print(f"[wrapper-login] 2FA write exit={exec_res.exit_code}")
+            emit_status({'phase': 'signing-in', 'message': 'Submitting 2FA code...'})
+            return exec_res.exit_code == 0
+        except Exception as e:
+            print(f"Failed to write 2FA from request thread: {e}")
+            return False
 
 def cancel_login():
     global _active_login
