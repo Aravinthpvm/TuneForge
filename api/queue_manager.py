@@ -328,7 +328,7 @@ def enqueue_album(album_id, storefront='us', expected_artist_id=None):
     emit_event('job.update', job_to_dict(job))
     return job
 
-def enqueue_song(song_id, storefront='us'):
+def enqueue_song(song_id, storefront='us', expected_album_id=None):
     try:
         raw_meta = get_song(storefront, song_id)
         meta = raw_meta.get('data', [{}])[0]
@@ -339,6 +339,12 @@ def enqueue_song(song_id, storefront='us'):
     artist_name = attr.get('artistName', 'Unknown Artist')
     song_name = attr.get('name', 'Unknown Song')
     
+    album_id = expected_album_id
+    if not album_id:
+        song_url = attr.get('url', '')
+        m = re.search(r'/album/(?:[^/]+/)?(\d+)(?:\?|$)', song_url)
+        album_id = m.group(1) if m else None
+        
     lib_index = scan_library_once()
     if has_song_in_library(artist_name, song_name, lib_index):
         err = Exception(f"Song already in library: {artist_name} - {song_name}")
@@ -352,6 +358,7 @@ def enqueue_song(song_id, storefront='us'):
         status='pending',
         progress=0,
         song_id=song_id,
+        album_id=album_id,
         album_title=song_name,
         artist=artist_name,
         artwork_url=artwork_url(attr.get('artwork', {}).get('url'), 600),
@@ -436,11 +443,11 @@ def run_job_execution(job_id):
         quality = s.get('quality', 'flac')
         url_target = ""
         if job.kind == 'album':
-            url_target = f"https://music.apple.com/{s.get('storefront', 'us')}/album/{job.album_id}"
+            url_target = f"https://music.apple.com/{s.get('storefront', 'us')}/album/_/{job.album_id}"
         elif job.kind == 'song':
-            url_target = f"https://music.apple.com/{s.get('storefront', 'us')}/song/{job.song_id}"
+            url_target = f"https://music.apple.com/{s.get('storefront', 'us')}/album/_/{job.album_id}?i={job.song_id}"
         elif job.kind == 'playlist':
-            url_target = f"https://music.apple.com/{s.get('storefront', 'us')}/playlist/{job.playlist_id}"
+            url_target = f"https://music.apple.com/{s.get('storefront', 'us')}/playlist/_/{job.playlist_id}"
             
         args = []
         if is_song:

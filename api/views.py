@@ -429,7 +429,8 @@ def playlist_library_detail_view(request, library_id):
 def download_album_view(request):
     body = get_json_body(request)
     album_id = body.get('albumId')
-    storefront = body.get('storefront', 'us')
+    s = read_settings()
+    storefront = body.get('storefront') or s.get('storefront', 'us')
     
     if not album_id:
         return JsonResponse({'error': 'albumId required'}, status=400)
@@ -446,13 +447,15 @@ def download_album_view(request):
 def download_song_view(request):
     body = get_json_body(request)
     song_id = body.get('songId')
-    storefront = body.get('storefront', 'us')
+    album_id = body.get('albumId')
+    s = read_settings()
+    storefront = body.get('storefront') or s.get('storefront', 'us')
     
     if not song_id:
         return JsonResponse({'error': 'songId required'}, status=400)
         
     try:
-        job = enqueue_song(song_id, storefront)
+        job = enqueue_song(song_id, storefront, album_id)
         return JsonResponse(job_to_dict(job))
     except Exception as e:
         code = getattr(e, 'code', None)
@@ -463,7 +466,8 @@ def download_song_view(request):
 def download_playlist_view(request):
     body = get_json_body(request)
     playlist_id = body.get('playlistId')
-    storefront = body.get('storefront', 'us')
+    s = read_settings()
+    storefront = body.get('storefront') or s.get('storefront', 'us')
     name = body.get('name')
     
     if not playlist_id:
