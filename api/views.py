@@ -484,7 +484,6 @@ def events_view(request):
                 
     response = StreamingHttpResponse(event_generator(), content_type='text/event-stream')
     response['Cache-Control'] = 'no-cache, no-transform'
-    response['Connection'] = 'keep-alive'
     response['X-Accel-Buffering'] = 'no'
     return response
 
