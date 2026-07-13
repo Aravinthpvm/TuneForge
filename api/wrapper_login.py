@@ -226,7 +226,6 @@ def run_login_worker(email, password, client):
     finally:
         # 4. Clean up and Restore
         try:
-            login_container.stop(timeout=2)
             login_container.remove(force=True)
         except Exception:
             pass
