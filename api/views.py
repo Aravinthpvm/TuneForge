@@ -331,7 +331,7 @@ def search_view(request):
 @api_require_auth
 def album_detail_view(request, id):
     s = read_settings()
-    storefront = request.GET.get('storefront', s.get('storefront', 'us'))
+    storefront = request.GET.get('storefront') or s.get('storefront', 'us')
     try:
         raw = get_album(storefront, id, s.get('language', 'en-US'))
         data_list = raw.get('data', [])
@@ -342,30 +342,85 @@ def album_detail_view(request, id):
         # Check track presence
         presence = get_album_track_presence(album['artistName'], album['name'], album['tracks'])
         album['presence'] = presence
-        return JsonResponse(album)
+        return JsonResponse({'album': album, 'storefront': storefront})
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
 @api_require_auth
 def artist_detail_view(request, id):
     s = read_settings()
-    storefront = request.GET.get('storefront', s.get('storefront', 'us'))
+    storefront = request.GET.get('storefront') or s.get('storefront', 'us')
     try:
         raw = get_artist(storefront, id, s.get('language', 'en-US'))
-        return JsonResponse(raw)
+        artist_data = raw.get('data', [{}])[0]
+        if not artist_data:
+            return JsonResponse({'error': 'Artist not found'}, status=404)
+            
+        albums_raw = artist_data.get('relationships', {}).get('albums', {}).get('data', [])
+        albums = []
+        for item in albums_raw:
+            attr = item.get('attributes', {})
+            release_date = attr.get('releaseDate')
+            year = str(release_date)[:4] if release_date else None
+            albums.append({
+                'id': item.get('id'),
+                'type': item.get('type'),
+                'name': attr.get('name'),
+                'artistId': artist_data.get('id'),
+                'artistName': attr.get('artistName') or artist_data.get('attributes', {}).get('name'),
+                'releaseDate': release_date,
+                'year': year,
+                'trackCount': attr.get('trackCount'),
+                'artworkTemplate': attr.get('artwork', {}).get('url') if attr.get('artwork') else None,
+                'artworkColor': attr.get('artwork', {}).get('bgColor') if attr.get('artwork') else None,
+                'isSingle': attr.get('isSingle'),
+                'contentRating': attr.get('contentRating')
+            })
+            
+        filtered_albums = filter_albums_by_rating(albums, s.get('explicitFilter', 'explicit'))
+        
+        artist = {
+            'id': artist_data.get('id'),
+            'name': artist_data.get('attributes', {}).get('name'),
+            'genreNames': artist_data.get('attributes', {}).get('genreNames', []),
+            'url': artist_data.get('attributes', {}).get('url'),
+            'artworkTemplate': artist_data.get('attributes', {}).get('artwork', {}).get('url') if artist_data.get('attributes', {}).get('artwork') else None,
+            'artworkColor': artist_data.get('attributes', {}).get('artwork', {}).get('bgColor') if artist_data.get('attributes', {}).get('artwork') else None,
+        }
+        
+        return JsonResponse({
+            'artist': artist,
+            'albums': filtered_albums,
+            'storefront': storefront
+        })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
 @api_require_auth
 def playlist_detail_view(request, id):
     s = read_settings()
-    storefront = request.GET.get('storefront', s.get('storefront', 'us'))
+    storefront = request.GET.get('storefront') or s.get('storefront', 'us')
     try:
         raw = get_playlist(storefront, id, s.get('language', 'en-US'))
         data_list = raw.get('data', [])
         if not data_list:
             return JsonResponse({'error': 'Playlist not found'}, status=404)
-        return JsonResponse(normalize_playlist(data_list[0]))
+        playlist = normalize_playlist(data_list[0])
+        return JsonResponse({'playlist': playlist, 'storefront': storefront})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_require_auth
+def playlist_library_detail_view(request, library_id):
+    s = read_settings()
+    media_user_token = decrypt_secret(s.get('mediaUserToken'))
+    if not media_user_token:
+        return JsonResponse({'error': 'media-user-token not configured'}, status=412)
+    try:
+        playlist = get_library_playlist_detail(library_id, media_user_token, s.get('language', 'en-US'))
+        if not playlist:
+            return JsonResponse({'error': 'playlist not found'}, status=404)
+        return JsonResponse({'playlist': playlist, 'storefront': s.get('storefront', 'us')})
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 

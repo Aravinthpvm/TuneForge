@@ -24,6 +24,7 @@ urlpatterns = [
     path('search', views.search_view, name='search'),
     path('album/<str:id>', views.album_detail_view, name='album_detail'),
     path('artist/<str:id>', views.artist_detail_view, name='artist_detail'),
+    path('playlist/library/<str:library_id>', views.playlist_library_detail_view, name='playlist_library_detail'),
     path('playlist/<str:id>', views.playlist_detail_view, name='playlist_detail'),
     
     # Downloads & Queue
