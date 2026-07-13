@@ -27,18 +27,25 @@ urlpatterns = [
     path('playlist/<str:id>', views.playlist_detail_view, name='playlist_detail'),
     
     # Downloads & Queue
+    path('download', views.download_album_view, name='download'),
     path('download/album', views.download_album_view, name='download_album'),
     path('download/song', views.download_song_view, name='download_song'),
     path('download/playlist', views.download_playlist_view, name='download_playlist'),
+    path('download/cancel-all', views.download_cancel_all_view, name='download_cancel_all'),
+    path('download/<str:id>', views.download_cancel_path_view, name='download_cancel_path'),
     path('queue', views.queue_list_view, name='queue_list'),
     path('queue/cancel', views.queue_cancel_view, name='queue_cancel'),
     
     # Library Index
     path('library', views.library_index_view, name='library_index'),
+    path('library/presence', views.library_presence_view, name='library_presence'),
+    path('library/song', views.library_delete_song_view, name='library_delete_song'),
+    path('library/playlist', views.library_delete_playlist_view, name='library_delete_playlist'),
+    path('library/album', views.library_delete_album_view, name='library_delete_album'),
     
     # Following Artists
     path('following', views.followed_artists_list_view, name='following_list'),
-    path('following/add', views.follow_artist_view, name='following_add'), # We handle POST on following or following/add
+    path('following/add', views.follow_artist_view, name='following_add'),
     path('following/<str:id>', views.unfollow_artist_view, name='following_delete'),
     path('following/<str:id>/check', views.artist_release_check_view, name='following_check'),
     
@@ -48,6 +55,7 @@ urlpatterns = [
     path('cloud-library/playlists', views.cloud_library_items_view, name='cloud_library_playlists'),
     path('cloud-library/playlists/<str:id>', views.cloud_library_playlist_detail_view, name='cloud_library_playlist_detail'),
     path('cloud-library/songs', views.cloud_library_items_view, name='cloud_library_songs'),
+    path('cloud-library/download-all', views.cloud_library_download_all_view, name='cloud_library_download_all'),
     
     # Server-Sent Events
     path('events', views.events_view, name='events'),

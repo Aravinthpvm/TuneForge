@@ -12,12 +12,17 @@ from functools import wraps
 from .models import Job, FollowedArtist
 from .settings_store import read_settings, write_settings, read_public_settings, decrypt_secret, encrypt_secret
 from .apple_api import search_catalog, get_album, get_song, get_artist, get_playlist, normalize_album, normalize_playlist
-from .library_index import scan_library_once, get_album_track_presence, invalidate_library_cache
+from .library_index import (
+    scan_library_once, get_album_track_presence, invalidate_library_cache,
+    get_music_root, to_rel, AUDIO_RE, make_album_key, make_song_key, strip_trailing_year
+)
 from .queue_manager import (
     enqueue_album, enqueue_song, enqueue_playlist, list_jobs, get_job, cancel_job,
     probe_wrapper_ports, register_listener, unregister_listener, emit_event
 )
-from .apple_library_api import get_my_storefront, fetch_library_page, get_library_playlist_detail
+from .apple_library_api import (
+    get_my_storefront, fetch_library_page, get_library_playlist_detail, iterate_library
+)
 from .wrapper_login import (
     is_docker_reachable, start_wrapper_login, get_login_status, submit_2fa, cancel_login, get_hard_block, clear_hard_block
 )
@@ -419,7 +424,16 @@ def cloud_library_health_view(request):
 
 @api_require_auth
 def cloud_library_items_view(request):
-    kind = request.GET.get('kind', 'albums')
+    path = request.path.rstrip('/')
+    if path.endswith('albums'):
+        kind = 'albums'
+    elif path.endswith('playlists'):
+        kind = 'playlists'
+    elif path.endswith('songs'):
+        kind = 'songs'
+    else:
+        kind = request.GET.get('kind', 'albums')
+        
     if kind not in ('albums', 'playlists', 'songs'):
         return JsonResponse({'error': 'kind must be albums, playlists, or songs'}, status=400)
         
@@ -606,3 +620,340 @@ def settings_media_user_token_view(request):
     if request.method == 'DELETE':
         return settings_media_user_token_delete(request)
     return settings_media_user_token_post(request)
+
+# 12. Direct Download Cancels and Deletions
+@api_require_auth
+@csrf_exempt
+def download_cancel_path_view(request, id):
+    if request.method == 'DELETE':
+        res = cancel_job(id)
+        if res['ok']:
+            return JsonResponse({'ok': True})
+        else:
+            return JsonResponse({'error': res['message']}, status=400)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+@api_require_auth
+@csrf_exempt
+def download_cancel_all_view(request):
+    if request.method == 'POST':
+        # Cancel all active/pending jobs
+        jobs = Job.objects.filter(status__in=('pending', 'queued', 'downloading', 'transcoding', 'moving'))
+        count = 0
+        for j in jobs:
+            res = cancel_job(j.id)
+            if res['ok']:
+                count += 1
+        return JsonResponse({'ok': True, 'cancelled': count})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+@api_require_auth
+@csrf_exempt
+def cloud_library_download_all_view(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    body = get_json_body(request)
+    kind = body.get('kind', '')
+    if kind not in ('albums', 'playlists', 'songs'):
+        return JsonResponse({'error': 'kind must be albums, playlists, or songs'}, status=400)
+        
+    s = read_settings()
+    media_user_token = decrypt_secret(s.get('mediaUserToken'))
+    if not media_user_token:
+        return JsonResponse({'error': 'media-user-token not configured'}, status=412)
+        
+    storefront = s.get('storefront', 'us')
+    quality = body.get('quality') or s.get('quality', 'flac')
+    
+    # We do a simplified iteration and enqueuing in a worker thread or synchronously
+    scanned = 0
+    queued = 0
+    skipped_existing = 0
+    unsupported = 0
+    errors = []
+    
+    emit_event('cloud-library.download-all.progress', {
+        'kind': kind,
+        'scanned': 0,
+        'queued': 0,
+        'total': None,
+        'done': False
+    })
+    
+    try:
+        for item in iterate_library(kind, media_user_token, s.get('language', 'en-US'), storefront):
+            scanned += 1
+            catalog_id = item.get('catalogId')
+            library_id = item.get('libraryId')
+            
+            enqueueable = library_id if kind == 'playlists' else (catalog_id and item.get('downloadable'))
+            if not enqueueable:
+                unsupported += 1
+                continue
+                
+            try:
+                from .queue_manager import enqueue_album, enqueue_song, enqueue_playlist
+                if kind == 'playlists':
+                    job = enqueue_playlist(library_id, storefront, item.get('name'))
+                elif kind == 'albums':
+                    job = enqueue_album(catalog_id, storefront)
+                elif kind == 'songs':
+                    job = enqueue_song(catalog_id, storefront)
+                    
+                if job:
+                    if job.status in ('queued', 'pending', 'downloading'):
+                        queued += 1
+                    else:
+                        unsupported += 1
+            except Exception as err:
+                code = getattr(err, 'code', None)
+                if code == 'ALREADY_IN_LIBRARY':
+                    skipped_existing += 1
+                else:
+                    errors.append({'libraryId': library_id, 'name': item.get('name'), 'error': str(err)})
+                    
+            if scanned % 5 == 0:
+                emit_event('cloud-library.download-all.progress', {
+                    'kind': kind,
+                    'scanned': scanned,
+                    'queued': queued,
+                    'skippedExisting': skipped_existing,
+                    'unsupported': unsupported,
+                    'done': False
+                })
+                
+        emit_event('cloud-library.download-all.progress', {
+            'kind': kind,
+            'scanned': scanned,
+            'queued': queued,
+            'skippedExisting': skipped_existing,
+            'unsupported': unsupported,
+            'done': True
+        })
+        
+        return JsonResponse({
+            'ok': True,
+            'kind': kind,
+            'scanned': scanned,
+            'queued': queued,
+            'skippedExisting': skipped_existing,
+            'skippedQueued': 0,
+            'unsupported': unsupported,
+            'errorCount': len(errors),
+            'errors': errors[:20]
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_require_auth
+@csrf_exempt
+def library_presence_view(request):
+    body = get_json_body(request)
+    album_checks = body.get('albums', [])
+    song_checks = body.get('songs', [])
+    playlist_checks = body.get('playlists', [])
+    album_track_checks = body.get('albumTracks', [])
+    
+    index = scan_library_once()
+    
+    albums = {}
+    for item in album_checks:
+        id_ = str(item.get('id', ''))
+        if not id_:
+            continue
+        artist_name = str(item.get('artistName', ''))
+        album_name = strip_trailing_year(str(item.get('albumName', '')))
+        key = make_album_key(artist_name, album_name)
+        albums[id_] = key in index['albumKeys']
+        
+    songs = {}
+    for item in song_checks:
+        id_ = str(item.get('id', ''))
+        if not id_:
+            continue
+        artist_name = str(item.get('artistName', ''))
+        song_name = str(item.get('songName', ''))
+        key = make_song_key(artist_name, song_name)
+        songs[id_] = key in index['songKeys']
+        
+    playlists = {}
+    for item in playlist_checks:
+        id_ = str(item.get('id', ''))
+        if not id_:
+            continue
+        playlists[id_] = id_ in index['playlistIds']
+        
+    album_tracks = {}
+    for item in album_track_checks:
+        id_ = str(item.get('id', ''))
+        if not id_:
+            continue
+        artist_name = str(item.get('artistName', ''))
+        album_name = strip_trailing_year(str(item.get('albumName', '')))
+        tracks = item.get('tracks', [])
+        album_tracks[id_] = get_album_track_presence(artist_name, album_name, tracks, index)
+        
+    return JsonResponse({
+        'albums': albums,
+        'songs': songs,
+        'playlists': playlists,
+        'albumTracks': album_tracks
+    })
+
+def rel_parts(rel_path):
+    return [p.strip() for p in re.split(r'[\\/]+', str(rel_path)) if p.strip()]
+
+def resolve_under_music_root(rel_path):
+    music_root = get_music_root()
+    parts = rel_parts(rel_path)
+    if not parts or any(p.startswith('.') for p in parts):
+        raise Exception('invalid path')
+    abs_path = os.path.abspath(os.path.join(music_root, *parts))
+    if not abs_path.startswith(music_root):
+        raise Exception('out of music root')
+    return abs_path
+
+@api_require_auth
+@csrf_exempt
+def library_delete_song_view(request):
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    body = get_json_body(request)
+    rel_path = body.get('relPath', '')
+    parts = rel_parts(rel_path)
+    if len(parts) != 3 or parts[1].lower() != 'singles':
+        return JsonResponse({'error': 'invalid song path'}, status=400)
+    if any(p.startswith('.') for p in parts):
+        return JsonResponse({'error': 'invalid song path'}, status=400)
+    if not AUDIO_RE.search(parts[2]):
+        return JsonResponse({'error': 'audio file required'}, status=400)
+        
+    try:
+        abs_path = resolve_under_music_root(rel_path)
+        if not os.path.isfile(abs_path):
+            return JsonResponse({'error': 'song not found'}, status=404)
+            
+        os.remove(abs_path)
+        
+        # Remove companion lrc
+        base, _ = os.path.splitext(abs_path)
+        lrc_path = base + '.lrc'
+        removed_lyrics = False
+        if os.path.isfile(lrc_path):
+            try:
+                os.remove(lrc_path)
+                removed_lyrics = True
+            except Exception:
+                pass
+                
+        invalidate_library_cache()
+        emit_event('library.changed', {
+            'kind': 'song-deleted',
+            'artistName': parts[0],
+            'songName': os.path.splitext(parts[2])[0]
+        })
+        
+        # Trigger Navidrome
+        from .queue_manager import trigger_navidrome_scan
+        trigger_navidrome_scan(read_settings())
+        
+        return JsonResponse({'ok': True, 'removedLyrics': removed_lyrics})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+@api_require_auth
+@csrf_exempt
+def library_delete_playlist_view(request):
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    body = get_json_body(request)
+    rel_path = body.get('relPath', '')
+    
+    try:
+        music_root = get_music_root()
+        playlists_root = os.path.join(music_root, 'Playlists')
+        parts = rel_parts(rel_path)
+        if not parts or any(p.startswith('.') for p in parts):
+            return JsonResponse({'error': 'invalid playlist path'}, status=400)
+            
+        abs_path = os.path.abspath(os.path.join(music_root, *parts))
+        if not (abs_path == playlists_root or abs_path.startswith(playlists_root + os.path.sep)):
+            return JsonResponse({'error': 'out of playlists directory'}, status=400)
+        if not abs_path.lower().endswith('.m3u8'):
+            return JsonResponse({'error': 'not an m3u8 file'}, status=400)
+            
+        if not os.path.isfile(abs_path):
+            return JsonResponse({'error': 'playlist not found'}, status=404)
+            
+        os.remove(abs_path)
+        
+        # Remove artwork
+        playlists_dir = os.path.dirname(abs_path)
+        stem, _ = os.path.splitext(os.path.basename(abs_path))
+        for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+            art_path = os.path.join(playlists_dir, f"{stem}{ext}")
+            if os.path.isfile(art_path):
+                try:
+                    os.remove(art_path)
+                except Exception:
+                    pass
+                    
+        # Remove companion dir
+        companion_dir = os.path.join(playlists_dir, stem)
+        if os.path.isdir(companion_dir):
+            try:
+                import shutil
+                shutil.rmtree(companion_dir)
+            except Exception:
+                pass
+                
+        invalidate_library_cache()
+        emit_event('library.changed', {
+            'kind': 'playlist-deleted',
+            'relPath': to_rel(abs_path, music_root)
+        })
+        
+        # Trigger Navidrome
+        from .queue_manager import trigger_navidrome_scan
+        trigger_navidrome_scan(read_settings())
+        
+        return JsonResponse({'ok': True})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+@api_require_auth
+@csrf_exempt
+def library_delete_album_view(request):
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    body = get_json_body(request)
+    rel_path = body.get('relPath', '')
+    parts = rel_parts(rel_path)
+    if len(parts) != 2:
+        return JsonResponse({'error': 'invalid album path'}, status=400)
+    if any(p.startswith('.') for p in parts):
+        return JsonResponse({'error': 'invalid album path'}, status=400)
+    if parts[1].lower() == 'singles':
+        return JsonResponse({'error': 'use song delete for singles'}, status=400)
+        
+    try:
+        abs_path = resolve_under_music_root(rel_path)
+        if not os.path.isdir(abs_path):
+            return JsonResponse({'error': 'album not found'}, status=404)
+            
+        import shutil
+        shutil.rmtree(abs_path)
+        invalidate_library_cache()
+        emit_event('library.changed', {
+            'kind': 'album-deleted',
+            'artistName': parts[0],
+            'albumName': parts[1]
+        })
+        
+        # Trigger Navidrome
+        from .queue_manager import trigger_navidrome_scan
+        trigger_navidrome_scan(read_settings())
+        
+        return JsonResponse({'ok': True})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)

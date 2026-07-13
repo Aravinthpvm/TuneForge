@@ -423,3 +423,16 @@ def get_library_playlist_detail(library_id, media_user_token, language='en-US'):
         'undownloadableCount': undownloadable_count,
         'downloadable': any(t['downloadable'] for t in tracks),
     }
+
+def iterate_library(kind, media_user_token, language='en-US', storefront='us'):
+    offset = 0
+    while True:
+        page = fetch_library_page(kind, media_user_token, language, offset, limit=100, storefront=storefront)
+        items = page['items']
+        if not items:
+            break
+        for item in items:
+            yield item
+        if not page['next']:
+            break
+        offset = page['next']
