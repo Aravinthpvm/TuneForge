@@ -191,6 +191,9 @@ def mask_email(email):
 
 def read_public_settings():
     s = read_settings()
+    email_encrypted = s.get('appleEmail')
+    email = decrypt_secret(email_encrypted) if email_encrypted else None
+    
     return {
         'storefront': s['storefront'],
         'language': s['language'],
@@ -206,7 +209,8 @@ def read_public_settings():
         'lyricsType': s['lyricsType'] or 'lyrics',
         'promptForDownloadQuality': bool(s['promptForDownloadQuality']),
         'explicitFilter': s['explicitFilter'] or 'explicit',
-        'appleEmailMasked': mask_email(s['appleEmail']) if s['appleEmail'] else None,
+        'appleEmailMasked': mask_email(email) if email else None,
+        'hasAppleCreds': bool(s['appleEmail'] and s['applePassword']),
         'hasApplePassword': bool(s['applePassword']),
         'hasMediaUserToken': bool(s['mediaUserToken']),
         'navidromeEnabled': bool(s['navidromeEnabled']),
