@@ -649,9 +649,6 @@ def queue_worker_loop():
                 print(f"Error running job {job_id}: {e}")
             finally:
                 _job_queue.task_done()
-                print(f"Error running job {job_id}: {e}")
-            finally:
-                _job_queue.task_done()
         except Exception as e:
             print(f"Queue worker loop encountered error: {e}")
             time.sleep(2)
