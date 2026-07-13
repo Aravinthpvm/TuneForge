@@ -575,9 +575,9 @@ def trigger_navidrome_scan(s):
     import hashlib
     import secrets
     
-    url = s.get('navidromeUrl', '').strip()
-    user = s.get('navidromeUser', '').strip()
-    pwd = s.get('navidromePassword', '').strip()
+    url = (s.get('navidromeUrl') or '').strip()
+    user = (s.get('navidromeUser') or '').strip()
+    pwd = (s.get('navidromePassword') or '').strip()
     if not url or not user or not pwd:
         return
         

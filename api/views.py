@@ -689,8 +689,8 @@ def events_view(request):
 @csrf_exempt
 def settings_apple_credentials_post(request):
     body = get_json_body(request)
-    email = body.get('email', '').strip()
-    password = body.get('password', '').strip()
+    email = (body.get('email') or '').strip()
+    password = (body.get('password') or '').strip()
     auto_login = body.get('autoLogin', True)
     
     if not email or not password:
@@ -741,7 +741,7 @@ def settings_apple_credentials_login_status_get(request):
 @csrf_exempt
 def settings_apple_credentials_2fa_post(request):
     body = get_json_body(request)
-    code = body.get('code', '').strip()
+    code = (body.get('code') or '').strip()
     if not code:
         return JsonResponse({'error': 'code required'}, status=400)
     submit_2fa(code)
@@ -766,7 +766,7 @@ def settings_apple_credentials_delete(request):
 @csrf_exempt
 def settings_media_user_token_post(request):
     body = get_json_body(request)
-    token = body.get('token', '').strip()
+    token = (body.get('token') or '').strip()
     if not token:
         return JsonResponse({'error': 'token required'}, status=400)
     write_settings({
