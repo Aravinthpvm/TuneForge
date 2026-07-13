@@ -29,6 +29,8 @@ def api_require_auth(view_func):
         if getattr(settings, 'AUTH_DISABLED', False):
             return view_func(request, *args, **kwargs)
         if not request.user.is_authenticated:
+            if not User.objects.exists():
+                return JsonResponse({'error': 'auth not configured', 'needsSetup': True}, status=401)
             return JsonResponse({'error': 'Unauthorized'}, status=401)
         return view_func(request, *args, **kwargs)
     return wrapper
