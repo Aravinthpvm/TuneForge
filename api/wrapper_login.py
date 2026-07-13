@@ -214,7 +214,7 @@ def run_login_worker(email, password, client):
                 break
                 
         if success:
-            emit_status({'phase': 'success', 'message': 'Apple Sign-In successful!'})
+            emit_status({'phase': 'starting-main', 'message': 'Apple Sign-In successful! Starting wrapper...'})
         else:
             reason = extract_wrapper_failure_reason(collected_log)
             if reason and ('disabled' in reason.lower() or 'locked' in reason.lower()):
@@ -230,11 +230,11 @@ def run_login_worker(email, password, client):
         except Exception:
             pass
         restore_daemon_wrapper(client, spec)
+        emit_status({'phase': 'ready', 'message': 'Signed in successfully.'})
         with _active_login_lock:
             _active_login = None
 
 def restore_daemon_wrapper(client, spec):
-    emit_status({'phase': 'restoring', 'message': 'Restarting decryption daemon'})
     try:
         binds = [spec['bind']] + [
             '/dev/null:/app/rootfs/dev/null',

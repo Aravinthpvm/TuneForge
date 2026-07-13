@@ -24,7 +24,7 @@ export function useEventStream(handler: Handler, options?: Options) {
       optionsRef.current?.onStatusChange?.(
         backoff > 1000 ? 'reconnecting' : 'connecting',
       )
-      es = new EventSource('/api/events')
+      es = new EventSource('/api/events', { withCredentials: true })
       const onJobEvent = (type: string) => (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data)
