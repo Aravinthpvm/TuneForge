@@ -175,27 +175,154 @@ def settings_post_view(request):
     next_settings = write_settings(patch)
     return JsonResponse(read_public_settings())
 
+def normalize_text_rating(val):
+    return str(val or '').strip().lower()
+
+def group_key_rating(album):
+    return f"{normalize_text_rating(album.get('name'))}|{normalize_text_rating(album.get('artistName'))}"
+
+def filter_albums_by_rating(albums, preference):
+    if not albums:
+        return []
+    if preference == 'both':
+        return albums
+        
+    pref = 'clean' if preference == 'clean' else 'explicit'
+    groups = {}
+    for album in albums:
+        key = group_key_rating(album)
+        existing = groups.get(key)
+        if not existing:
+            groups[key] = album
+            continue
+        existing_matches = (existing.get('contentRating') == pref)
+        candidate_matches = (album.get('contentRating') == pref)
+        if candidate_matches and not existing_matches:
+            groups[key] = album
+            
+    kept_ids = {id(k) for k in groups.values()}
+    return [a for a in albums if id(a) in kept_ids]
+
 # 4. Search View
 @api_require_auth
 def search_view(request):
     term = request.GET.get('q', '').strip() or request.GET.get('term', '').strip()
-    storefront = request.GET.get('storefront', 'us')
-    limit = int(request.GET.get('limit', '25'))
-    offset = int(request.GET.get('offset', '0'))
-    
+    if not term:
+        return JsonResponse({'albums': [], 'artists': [], 'songs': [], 'playlists': []})
+        
     s = read_settings()
+    storefront = request.GET.get('storefront') or s.get('storefront', 'us')
+    limit = min(int(request.GET.get('limit', '25')), 50)
+    offset = max(int(request.GET.get('offset', '0')), 0)
+    types = request.GET.get('types', 'albums,artists,songs,playlists')
+    
     media_user_token = decrypt_secret(s.get('mediaUserToken'))
     
     try:
-        results = search_catalog(
+        data = search_catalog(
             storefront=storefront,
             term=term,
+            types=types,
             limit=limit,
             offset=offset,
             language=s.get('language', 'en-US'),
             media_user_token=media_user_token
         )
-        return JsonResponse(results)
+        
+        r = data.get('results', {})
+        
+        artists = []
+        for x in r.get('artists', {}).get('data', []):
+            attr = x.get('attributes', {})
+            artists.append({
+                'id': x.get('id'),
+                'type': x.get('type'),
+                'name': attr.get('name'),
+                'genreNames': attr.get('genreNames', []),
+                'url': attr.get('url')
+            })
+            
+        def resolve_artist_id(rel_id, artist_name):
+            if rel_id:
+                return rel_id
+            for a in artists:
+                if a['name'] == artist_name:
+                    return a['id']
+            return None
+            
+        albums = []
+        for x in r.get('albums', {}).get('data', []):
+            attr = x.get('attributes', {})
+            rel_artists = x.get('relationships', {}).get('artists', {}).get('data', [])
+            rel_artist_id = rel_artists[0].get('id') if rel_artists and isinstance(rel_artists, list) else None
+            release_date = attr.get('releaseDate')
+            year = str(release_date)[:4] if release_date else None
+            
+            albums.append({
+                'id': x.get('id'),
+                'type': x.get('type'),
+                'name': attr.get('name'),
+                'artistName': attr.get('artistName'),
+                'artistId': resolve_artist_id(rel_artist_id, attr.get('artistName')),
+                'releaseDate': release_date,
+                'year': year,
+                'trackCount': attr.get('trackCount'),
+                'isSingle': attr.get('isSingle'),
+                'contentRating': attr.get('contentRating'),
+                'artworkTemplate': attr.get('artwork', {}).get('url') if attr.get('artwork') else None,
+                'artworkColor': attr.get('artwork', {}).get('bgColor') if attr.get('artwork') else None,
+                'url': attr.get('url')
+            })
+            
+        songs = []
+        for x in r.get('songs', {}).get('data', []):
+            attr = x.get('attributes', {})
+            song_url = attr.get('url', '')
+            rel_artists = x.get('relationships', {}).get('artists', {}).get('data', [])
+            rel_artist_id = rel_artists[0].get('id') if rel_artists and isinstance(rel_artists, list) else None
+            
+            # Match song URL to extract album ID
+            m = re.search(r'/album/(?:[^/]+/)?(\d+)(?:\?|$)', song_url)
+            album_id = m.group(1) if m else None
+            
+            songs.append({
+                'id': x.get('id'),
+                'type': x.get('type'),
+                'name': attr.get('name'),
+                'artistName': attr.get('artistName'),
+                'artistId': resolve_artist_id(rel_artist_id, attr.get('artistName')),
+                'albumName': attr.get('albumName'),
+                'albumId': album_id,
+                'durationMs': attr.get('durationInMillis'),
+                'artworkTemplate': attr.get('artwork', {}).get('url') if attr.get('artwork') else None,
+                'artworkColor': attr.get('artwork', {}).get('bgColor') if attr.get('artwork') else None,
+                'url': song_url
+            })
+            
+        filtered_albums = filter_albums_by_rating(albums, s.get('explicitFilter', 'explicit'))
+        
+        playlists = []
+        for x in r.get('playlists', {}).get('data', []):
+            attr = x.get('attributes', {})
+            playlists.append({
+                'id': x.get('id'),
+                'type': x.get('type'),
+                'name': attr.get('name'),
+                'curatorName': attr.get('curatorName', 'Apple Music'),
+                'trackCount': attr.get('trackCount'),
+                'artworkTemplate': attr.get('artwork', {}).get('url') if attr.get('artwork') else None,
+                'artworkColor': attr.get('artwork', {}).get('bgColor') if attr.get('artwork') else None,
+                'url': attr.get('url'),
+                'description': attr.get('description', {}).get('standard', '')
+            })
+            
+        return JsonResponse({
+            'albums': filtered_albums,
+            'artists': artists,
+            'songs': songs,
+            'playlists': playlists,
+            'storefront': storefront
+        })
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
