@@ -62,7 +62,7 @@ services:
       - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/srv
       - ./data/filebrowser:/database
     ports:
-      - "8080:80"
+      - "${FILEBROWSER_PORT:-8080}:80"
     networks:
       - tuneforge-net
     restart: unless-stopped
