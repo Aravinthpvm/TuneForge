@@ -614,30 +614,41 @@ def trigger_navidrome_scan(s):
         print(f"Failed to trigger Navidrome scan: {e}")
 
 def queue_worker_loop():
+    print("[TuneForge Queue] Worker loop starting...")
     # Reset any interrupted 'downloading' or 'transcoding' jobs to 'pending'
     # so they get retried or listed correctly.
     try:
-        Job.objects.filter(status__in=('downloading', 'transcoding', 'moving')).update(status='pending', progress=0)
+        updated = Job.objects.filter(status__in=('downloading', 'transcoding', 'moving')).update(status='pending', progress=0)
+        if updated > 0:
+            print(f"[TuneForge Queue] Reset {updated} interrupted jobs on startup.")
         # Load any pending jobs into memory queue
         pending_jobs = Job.objects.filter(status='pending').order_by('created_at')
         for job in pending_jobs:
             _job_queue.put(job.id)
             update_job(job.id, {'status': 'queued'})
+            print(f"[TuneForge Queue] Queued pending job {job.id} ({job.album_title})")
     except Exception as e:
         print(f"Error resetting running jobs on startup: {e}")
         
     while True:
         try:
             job_id = _job_queue.get()
+            print(f"[TuneForge Queue] Worker picked up job {job_id}")
             # Double check database
             try:
                 job = Job.objects.get(id=job_id)
                 if job.status == 'cancelled' or job.cancelled:
+                    print(f"[TuneForge Queue] Job {job_id} was already cancelled. Skipping.")
                     _job_queue.task_done()
                     continue
                 update_job(job_id, {'status': 'downloading'})
+                print(f"[TuneForge Queue] Executing job {job_id} ({job.album_title})...")
                 run_job_execution(job_id)
+                print(f"[TuneForge Queue] Job {job_id} finished execution.")
             except Exception as e:
+                print(f"Error running job {job_id}: {e}")
+            finally:
+                _job_queue.task_done()
                 print(f"Error running job {job_id}: {e}")
             finally:
                 _job_queue.task_done()
