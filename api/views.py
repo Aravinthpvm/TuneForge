@@ -173,7 +173,7 @@ def settings_post_view(request):
 # 4. Search View
 @api_require_auth
 def search_view(request):
-    term = request.GET.get('term', '')
+    term = request.GET.get('q', '').strip() or request.GET.get('term', '').strip()
     storefront = request.GET.get('storefront', 'us')
     limit = int(request.GET.get('limit', '25'))
     offset = int(request.GET.get('offset', '0'))
