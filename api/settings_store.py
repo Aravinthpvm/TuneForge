@@ -51,7 +51,11 @@ def ensure_config_initialized():
     
     settings_file = get_settings_file_path()
     if not os.path.exists(settings_file):
-        write_settings(DEFAULTS)
+        try:
+            with open(settings_file, 'w', encoding='utf-8') as f:
+                json.dump(DEFAULTS, f, indent=2)
+        except Exception as e:
+            print(f"Failed to write default settings: {e}")
 
 def encrypt_secret(plaintext):
     if plaintext is None or plaintext == '':
