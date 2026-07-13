@@ -19,7 +19,7 @@ from .library_index import (
 )
 from .queue_manager import (
     enqueue_album, enqueue_song, enqueue_playlist, list_jobs, get_job, cancel_job,
-    probe_wrapper_ports, register_listener, unregister_listener, emit_event
+    probe_wrapper_ports, register_listener, unregister_listener, emit_event, job_to_dict
 )
 from .apple_library_api import (
     get_my_storefront, fetch_library_page, get_library_playlist_detail, iterate_library
