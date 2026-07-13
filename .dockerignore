@@ -1,0 +1,11 @@
+.git
+.venv
+data
+**/node_modules
+**/dist
+**/build
+.env
+db.sqlite3
+Dockerfile
+docker-compose*.yml
+README.md

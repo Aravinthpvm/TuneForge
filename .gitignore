@@ -1,0 +1,37 @@
+# Python cache and byte-code
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+ENV/
+
+# Django local database
+db.sqlite3
+
+# Staging files, configurations and persistent data
+data/
+music/
+config/settings.json
+config/.secret
+staticfiles/
+
+# Node.js dependencies and builds
+node_modules/
+dist/
+build/
+.npm
+.eslintcache
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp

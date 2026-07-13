@@ -1,0 +1,73 @@
+services:
+  wrapper:
+    build:
+      context: ./wrapper
+      dockerfile: Dockerfile
+    image: alacarte-wrapper:local
+    container_name: alacarte-wrapper
+    platform: linux/amd64
+    volumes:
+      - ./data/wrapper:/app/rootfs/data
+      - /dev/null:/app/rootfs/dev/null
+      - /dev/urandom:/app/rootfs/dev/urandom
+      - /dev/random:/app/rootfs/dev/random
+      - /dev/zero:/app/rootfs/dev/zero
+    entrypoint: ["/app/wrapper"]
+    command: ["-H", "0.0.0.0"]
+    expose:
+      - "10020"
+      - "20020"
+      - "30020"
+    networks:
+      - tuneforge-net
+    restart: on-failure
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tuneforge-web
+    platform: linux/amd64
+    depends_on:
+      - wrapper
+    environment:
+      - PORT=8000
+      - AMDL_WRAPPER_HOST=alacarte-wrapper
+      - AMDL_WRAPPER_DECRYPT_PORT=10020
+      - AMDL_WRAPPER_M3U8_PORT=20020
+      - AMDL_WRAPPER_ACCOUNT_PORT=30020
+      - AMDL_MUSIC_PATH=/music
+      - AMDL_CONFIG_DIR=/config
+      - AMDL_SECRET_KEY=${AMDL_SECRET_KEY:-}
+      - AUTH_DISABLED=${AUTH_DISABLED:-false}
+      - TRUST_PROXY=${TRUST_PROXY:-loopback}
+    volumes:
+      - ./data/web:/config
+      - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/music
+      # Shared with the wrapper container so the web UI can drop a 2fa.txt file
+      - ./data/wrapper:/wrapper-data
+      # Required so the web UI can run first-time Apple ID login for the wrapper
+      - ${CONTAINER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8000}:8000"
+    networks:
+      - tuneforge-net
+    restart: unless-stopped
+
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: tuneforge-filebrowser
+    user: "0:0"
+    volumes:
+      - ${MUSIC_PATH:?Set MUSIC_PATH in .env}:/srv
+      - ./data/filebrowser:/database
+    ports:
+      - "8080:80"
+    networks:
+      - tuneforge-net
+    restart: unless-stopped
+
+networks:
+  tuneforge-net:
+    name: ${DOCKER_NETWORK:-tuneforge-net}
+    external: ${DOCKER_NETWORK_EXTERNAL:-false}
