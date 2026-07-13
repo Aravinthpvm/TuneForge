@@ -10,6 +10,7 @@ COPY ./rootfs /app/rootfs
 COPY ./wrapper /app
 COPY ./strtok_fix.c /app
 WORKDIR /app
+RUN chmod +x /app/wrapper
 
 RUN gcc -shared -fPIC -O2 -o /app/libwrapper_strtok_fix.so /app/strtok_fix.c -ldl
 
